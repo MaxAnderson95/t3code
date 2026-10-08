@@ -314,37 +314,40 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
           ),
         ),
       );
-      const loadOpenCode2ModelsWithProviderNames = Effect.gen(function* () {
-        const models = yield* loadOpenCode2Models;
-        if (models.length === 0) return models;
-        // Optional picker labels must not consume the model loader's deadline or cache.
-        const providerNames = yield* openCode2Server
-          .withConnection(({ client }) =>
-            client.provider
-              .list({ location: openCode2Location })
-              .pipe(
-                Effect.map(
-                  (providers) =>
-                    new Map<string, string>(
-                      providers.data.map((provider) => [provider.id, provider.name]),
-                    ),
-                ),
+      // Optional picker labels have their own deadline and must not affect the model cache.
+      const loadOpenCode2ProviderNames = openCode2Server
+        .withConnection(({ client }) =>
+          client.provider
+            .list({ location: openCode2Location })
+            .pipe(
+              Effect.map(
+                (providers) =>
+                  new Map<string, string>(
+                    providers.data.map((provider) => [provider.id, provider.name]),
+                  ),
               ),
-          )
-          .pipe(
-            Effect.timeout("5 seconds"),
-            Effect.catch((cause) =>
-              Effect.logWarning("OpenCode 2 provider name lookup failed; using provider IDs.", {
-                instanceId,
-                cause,
-              }).pipe(Effect.as(new Map<string, string>())),
             ),
-          );
-        return models.map((model) => ({
-          ...model,
-          providerName: providerNames.get(model.providerID),
-        }));
-      });
+        )
+        .pipe(
+          Effect.timeout("5 seconds"),
+          Effect.catch((cause) =>
+            Effect.logWarning("OpenCode 2 provider name lookup failed; using provider IDs.", {
+              instanceId,
+              cause,
+            }).pipe(Effect.as(new Map<string, string>())),
+          ),
+        );
+      const loadOpenCode2ModelsWithProviderNames = Effect.all(
+        { models: loadOpenCode2Models, providerNames: loadOpenCode2ProviderNames },
+        { concurrency: "unbounded" },
+      ).pipe(
+        Effect.map(({ models, providerNames }) =>
+          models.map((model) => ({
+            ...model,
+            providerName: providerNames.get(model.providerID),
+          })),
+        ),
+      );
       // A 2.x server lists skills and commands per directory, so one server
       // answers every workspace. Its event stream says when a directory it had
       // not served yet finished scanning.
