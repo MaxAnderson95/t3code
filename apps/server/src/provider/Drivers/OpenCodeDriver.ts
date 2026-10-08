@@ -301,26 +301,8 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
       const openCode2Location = { directory: serverConfig.cwd };
       const loadOpenCode2Models = yield* makeOpenCode2ModelLoader(
         openCode2Server.withConnection(({ client }) =>
-          Effect.all(
-            [
-              client.model.list({ location: openCode2Location }),
-              // Provider names only label the picker, so a failed lookup falls back to provider ids.
-              client.provider.list({ location: openCode2Location }).pipe(
-                Effect.map((providers) => providers.data),
-                Effect.orElseSucceed(() => []),
-              ),
-            ],
-            { concurrency: "unbounded" },
-          ).pipe(
-            Effect.map(([models, providers]) => {
-              const providerNames = new Map(
-                providers.map((provider) => [provider.id, provider.name]),
-              );
-              return models.data.map((model) => ({
-                ...model,
-                providerName: providerNames.get(model.providerID),
-              }));
-            }),
+          client.model.list({ location: openCode2Location }).pipe(
+            Effect.map((models) => models.data),
             Effect.mapError(
               (cause) =>
                 new OpenCodeRuntime.OpenCodeRuntimeError({
@@ -332,6 +314,37 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
           ),
         ),
       );
+      const loadOpenCode2ModelsWithProviderNames = Effect.gen(function* () {
+        const models = yield* loadOpenCode2Models;
+        if (models.length === 0) return models;
+        // Optional picker labels must not consume the model loader's deadline or cache.
+        const providerNames = yield* openCode2Server
+          .withConnection(({ client }) =>
+            client.provider
+              .list({ location: openCode2Location })
+              .pipe(
+                Effect.map(
+                  (providers) =>
+                    new Map<string, string>(
+                      providers.data.map((provider) => [provider.id, provider.name]),
+                    ),
+                ),
+              ),
+          )
+          .pipe(
+            Effect.timeout("5 seconds"),
+            Effect.catch((cause) =>
+              Effect.logWarning("OpenCode 2 provider name lookup failed; using provider IDs.", {
+                instanceId,
+                cause,
+              }).pipe(Effect.as(new Map<string, string>())),
+            ),
+          );
+        return models.map((model) => ({
+          ...model,
+          providerName: providerNames.get(model.providerID),
+        }));
+      });
       // A 2.x server lists skills and commands per directory, so one server
       // answers every workspace. Its event stream says when a directory it had
       // not served yet finished scanning.
@@ -392,7 +405,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
             effectiveConfig,
             serverConfig.cwd,
             runtimeProbe.refresh,
-            loadOpenCode2Models,
+            loadOpenCode2ModelsWithProviderNames,
           ),
           usageLimits: readOpenCodeGoUsageLimits({
             enabled: effectiveConfig.enabled,
